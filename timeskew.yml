@@ -1,0 +1,49 @@
+- name: Capture baseline time from PDC Emulator
+  hosts: pdc_emulator
+  gather_facts: no
+  tasks:
+    - name: Get current time from PDC Emulator
+      win_command: powershell -Command "Get-Date -Format o"
+      register: pdc_time
+
+    - name: Save baseline time for later plays
+      set_fact:
+        baseline_time: "{{ pdc_time.stdout }}"
+      delegate_to: localhost
+      run_once: true
+
+- name: Compare time skew against baseline
+  hosts: test_servers
+  gather_facts: no
+  tasks:
+    - name: Get current time from server
+      win_command: powershell -Command "Get-Date -Format o"
+      register: server_time
+
+    - name: Convert times to datetime objects
+      set_fact:
+        server_dt: "{{ server_time.stdout | to_datetime('%Y-%m-%dT%H:%M:%S.%f%z') }}"
+        baseline_dt: "{{ hostvars['localhost']['baseline_time'] | to_datetime('%Y-%m-%dT%H:%M:%S.%f%z') }}"
+
+    - name: Calculate skew in seconds
+      set_fact:
+        skew_seconds: "{{ (server_dt.timestamp() - baseline_dt.timestamp()) | int }}"
+
+    - name: Rotate log if larger than 5MB
+      command: >
+        bash -c 'if [ -f /var/log/ansible_time_skew.log ] &&
+        [ $(stat -c%s /var/log/ansible_time_skew.log) -gt 5242880 ];
+        then mv /var/log/ansible_time_skew.log /var/log/ansible_time_skew_$(date +%Y%m%d%H%M%S).log;
+        fi'
+      delegate_to: localhost
+      run_once: true
+
+    - name: Append results to central log
+      lineinfile:
+        path: /var/log/ansible_time_skew.log
+        line: "{{ inventory_hostname }} | Skew: {{ skew_seconds }}s | Checked: {{ now(fmt='%Y-%m-%dT%H:%M:%S') }}"
+      delegate_to: localhost
+
+    - name: Report skew
+      debug:
+        msg: "Skew vs PDC Emulator: {{ skew_seconds }} seconds"
